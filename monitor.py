@@ -18,6 +18,7 @@ import os
 import time
 import logging
 from datetime import datetime
+from tqdm import tqdm
 from rmv_checker import (
     get_rmv_data, 
     get_all_locations,
@@ -74,7 +75,7 @@ def send_ntfy_notification(url, message):
 
 def parse_date(date_str):
     """Parses the scraped date string into a datetime object."""
-    if "No Appointments" in date_str or "No Date Found" in date_str:
+    if "No Appointments" in date_str or "No Date Found" in date_str or "Location Not Available" in date_str:
         return None
     try:
         clean_date_str = date_str.strip().rstrip(',')
@@ -95,6 +96,11 @@ def check_for_appointments(rmv_url, ntfy_url, locations_to_monitor, state):
         logger.warning("Could not fetch live appointment data.")
         return state
 
+    current_time = datetime.now()
+    # Note: We could add a buffer time here to avoid updating state immediately 
+    # when appointments pass, but for now we update immediately to ensure
+    # the state stays current with the latest available appointments
+    
     for location_data in live_data:
         location_id = str(location_data['id'])
         location_name = location_data['service_center']
@@ -102,11 +108,54 @@ def check_for_appointments(rmv_url, ntfy_url, locations_to_monitor, state):
         new_date = parse_date(new_date_str)
 
         if not new_date:
-            logger.info(f"No appointments found for {location_name}.")
+            if "Location Not Available" in new_date_str:
+                logger.info(f"Location {location_name} is currently not available. Preserving previous appointment data.")
+                # Don't update state - keep the previous appointment data for comparison
+                # This allows us to detect when the location becomes available again
+            else:
+                logger.info(f"No appointments found for {location_name}.")
             continue
 
         last_known_date_str = state.get(location_id)
         last_known_date = parse_date(last_known_date_str) if last_known_date_str else None
+
+        # Check if the last known appointment has passed
+        # This ensures the state.json stays current with the latest available appointments
+        if last_known_date and last_known_date < current_time:
+            logger.info(f"Last known appointment at {location_name} has passed (was: {last_known_date_str}). Updating state with new data: {new_date_str}")
+            # Update state with the new appointment data
+            if "AM" in new_date_str or "PM" in new_date_str:
+                # We have a specific time
+                state[location_id] = new_date_str
+                message = f"New appointment at {location_name}: {new_date.strftime('%a, %b %d, %Y at %I:%M %p')}"
+            else:
+                # We only have a date
+                state[location_id] = new_date_str
+                message = f"New earliest date at {location_name}: {new_date.strftime('%a, %b %d, %Y')}"
+            
+            # Send notification for the new appointment that replaced the expired one
+            send_ntfy_notification(ntfy_url, message)
+            continue
+
+        # Check if location was previously unavailable but now has appointments
+        # We can detect this by checking if we have a valid date now but the last known date
+        # was from a previous check cycle (indicating the location was temporarily unavailable)
+        if last_known_date and new_date and new_date > last_known_date:
+            # This suggests the location might have been temporarily unavailable
+            # and now has a later appointment than before
+            logger.info(f"Location {location_name} appears to have new availability: {new_date_str}")
+            # Update state with the new appointment data
+            if "AM" in new_date_str or "PM" in new_date_str:
+                # We have a specific time
+                message = f"New appointment at {location_name}: {new_date.strftime('%a, %b %d, %Y at %I:%M %p')}"
+                state[location_id] = new_date_str
+            else:
+                # We only have a date
+                message = f"New earliest date at {location_name}: {new_date.strftime('%a, %b %d, %Y')}"
+                state[location_id] = new_date_str
+            
+            send_ntfy_notification(ntfy_url, message)
+            continue
 
         if not last_known_date or new_date < last_known_date:
             # Check if the original scraped string contained a time component (AM/PM)
@@ -122,6 +171,20 @@ def check_for_appointments(rmv_url, ntfy_url, locations_to_monitor, state):
             send_ntfy_notification(ntfy_url, message)
         else:
             logger.info(f"No change for {location_name}. Earliest is still {last_known_date_str}")
+    
+    # Ensure state is populated with earliest available appointments if it was empty
+    # This handles the case where state.json was empty or all appointments expired
+    if not state:
+        logger.info("State was empty. Populating with earliest available appointments.")
+        for location_data in live_data:
+            location_id = str(location_data['id'])
+            location_name = location_data['service_center']
+            new_date_str = location_data['earliest_date']
+            new_date = parse_date(new_date_str)
+            
+            if new_date:
+                state[location_id] = new_date_str
+                logger.info(f"Added {location_name} to state: {new_date_str}")
     
     save_json(state, STATE_FILE)
     logger.info("--- Check complete ---")
@@ -219,7 +282,13 @@ def run_monitor():
             logger.warning("The monitor will continue running.")
         
         logger.info(f"Sleeping for {frequency_minutes} minutes...")
-        time.sleep(frequency_minutes * 60)
+        
+        # Show progress bar for sleep countdown
+        total_seconds = frequency_minutes * 60
+        with tqdm(total=total_seconds, desc="Next check in", unit="s", bar_format="{desc}: {bar} {n_fmt}/{total_fmt}s [{elapsed}<{remaining}]") as pbar:
+            for _ in range(total_seconds):
+                time.sleep(1)
+                pbar.update(1)
 
 if __name__ == "__main__":
     run_monitor()

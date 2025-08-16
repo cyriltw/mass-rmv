@@ -217,7 +217,19 @@ def get_rmv_data(url, locations_to_check_by_id=None):
             try:
                 driver.get(url)
                 
-                element_to_click = wait.until(EC.presence_of_element_located((By.XPATH, f"//button[@data-id='{location['id']}']")))
+                # Try to find the element for this location
+                try:
+                    element_to_click = wait.until(EC.presence_of_element_located((By.XPATH, f"//button[@data-id='{location['id']}']")))
+                except TimeoutException:
+                    location_name = location.get('service_center', f"ID-{location['id']}")
+                    logger.warning(f"Location {location_name} (ID: {location['id']}) not found on the page, skipping to next location")
+                    # Add a result indicating this location was not available
+                    results.append({
+                        "id": location['id'],
+                        "service_center": location_name,
+                        "earliest_date": "Location Not Available"
+                    })
+                    continue
                 
                 location_name = location['service_center']
                 logger.info(f"Checking {i+1}/{num_to_check}: {location_name}...")
