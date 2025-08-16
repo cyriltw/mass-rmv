@@ -1,9 +1,9 @@
 # RMV Project files
 config.json
 state.json
+locations_map.json
 cron.log.venv/
 __pycache__/
 .venv/
 .env
 monitor.log
-
