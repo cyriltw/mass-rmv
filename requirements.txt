@@ -4,3 +4,4 @@ selenium
 webdriver-manager
 python-dotenv
 tqdm
+wandb
