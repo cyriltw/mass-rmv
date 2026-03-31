@@ -179,7 +179,7 @@ def parse_date(date_str):
     if "No Appointments" in date_str or "No Date Found" in date_str or "Location Not Available" in date_str:
         return None
     try:
-        clean_date_str = date_str.strip().rstrip(',')
+        clean_date_str = date_str.strip().splitlines()[0].strip().rstrip(',')
         return datetime.strptime(clean_date_str, '%a %b %d, %Y, %I:%M %p')
     except ValueError:
         try:
