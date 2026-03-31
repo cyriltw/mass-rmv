@@ -233,8 +233,11 @@ def _get_notification_target():
     - NOTIFY_YEAR: optional (defaults to current year)
     If NOTIFY_MONTH is unset/invalid, returns (None, None) meaning "no filter".
     """
-    month = _parse_target_month(os.getenv("NOTIFY_MONTH"))
+    raw_month = os.getenv("NOTIFY_MONTH")
+    month = _parse_target_month(raw_month)
     if month is None:
+        if raw_month is not None and str(raw_month).strip():
+            logger.warning(f"Ignoring invalid NOTIFY_MONTH={raw_month!r}; notifications will not be filtered.")
         return None, None
 
     year_raw = (os.getenv("NOTIFY_YEAR") or "").strip()
@@ -257,6 +260,14 @@ def _should_notify_for_date(dt, target_month, target_year):
 def check_for_appointments(rmv_url, ntfy_url, locations_to_monitor, state, wandb_run=None, locations_map=None):
     """The core logic for checking appointments and sending notifications."""
     logger.info(f"--- Running RMV Appointment Check ---")
+
+    # Reload .env so changing NOTIFY_MONTH/NOTIFY_YEAR takes effect without restarting.
+    # (No-op if values already in the environment.)
+    try:
+        load_dotenv(override=True)
+    except Exception:
+        # If dotenv isn't available for some reason, we still run with existing env vars.
+        pass
     
     live_data = get_rmv_data(rmv_url, locations_to_monitor)
     if not live_data:
@@ -271,6 +282,8 @@ def check_for_appointments(rmv_url, ntfy_url, locations_to_monitor, state, wandb
     target_month, target_year = _get_notification_target()
     if target_month is not None:
         logger.info(f"Notification filter enabled: only notifying for {target_month:02d}/{target_year}.")
+    else:
+        logger.info("Notification filter disabled: notifying for any month.")
     
     for location_data in live_data:
         location_id = str(location_data['id'])
