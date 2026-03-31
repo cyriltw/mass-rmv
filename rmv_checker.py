@@ -125,6 +125,31 @@ def prompt_for_frequency():
     update_env_file("CHECK_FREQUENCY_MINUTES", str(frequency_minutes))
     return frequency_minutes
 
+def prompt_for_notify_month_year():
+    """
+    Prompts user for an optional notification filter (month/year) and saves it.
+    Leave blank to disable filtering (no NOTIFY_* keys are written).
+    """
+    enable = input("Enable month/year notification filter? [y/N]: ").strip().lower()
+    if enable not in {"y", "yes"}:
+        return None, None
+
+    month = input(
+        "Only notify for a specific month? Enter 1-12 or a month name (e.g. April). Leave blank for no filter: "
+    ).strip()
+    if not month:
+        return None, None
+
+    update_env_file("NOTIFY_MONTH", month)
+
+    year = input("Notify year (optional; leave blank for current year): ").strip()
+    if year:
+        update_env_file("NOTIFY_YEAR", year)
+        return month, year
+
+    # If year is blank we don't write NOTIFY_YEAR; monitor.py will default to current year.
+    return month, None
+
 def setup_env_file():
     """Runs the full interactive setup to create/update the .env file."""
     print("--- Full RMV Appointment Checker Setup ---")
@@ -132,6 +157,7 @@ def setup_env_file():
     prompt_for_ntfy_url()
     prompt_for_locations(rmv_url)
     prompt_for_frequency()
+    prompt_for_notify_month_year()
     print("\nConfiguration saved to .env file.")
     return True
 
