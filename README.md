@@ -38,6 +38,14 @@ A simple tool to monitor the Massachusetts RMV website for earlier appointment t
     python3 monitor.py
     ```
 
+Install Google Chrome
+```
+sudo apt-get update
+wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+```
+
+Verify with `google-chrome --version`
 ## Usage
 
 ### Step 1: Initial Setup (Interactive)
