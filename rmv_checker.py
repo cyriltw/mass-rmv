@@ -125,30 +125,58 @@ def prompt_for_frequency():
     update_env_file("CHECK_FREQUENCY_MINUTES", str(frequency_minutes))
     return frequency_minutes
 
-def prompt_for_notify_month_year():
+def _validate_iso_date(value):
+    """Returns the input if it parses as YYYY-MM-DD, else None."""
+    try:
+        from datetime import datetime
+        datetime.strptime(value, "%Y-%m-%d")
+        return value
+    except ValueError:
+        return None
+
+def prompt_for_notify_filter():
     """
-    Prompts user for an optional notification filter (month/year) and saves it.
+    Prompts user for an optional notification filter and saves it.
+    Supports either a month/year filter or a specific date range.
     Leave blank to disable filtering (no NOTIFY_* keys are written).
     """
-    enable = input("Enable month/year notification filter? [y/N]: ").strip().lower()
+    enable = input("Enable notification filter? [y/N]: ").strip().lower()
     if enable not in {"y", "yes"}:
-        return None, None
+        return
+
+    print("Filter types:")
+    print("  1) Month/year (e.g. April 2026)")
+    print("  2) Date range (e.g. 2026-04-15 through 2026-05-10)")
+    choice = input("Choose [1/2, default: 1]: ").strip() or "1"
+
+    if choice == "2":
+        start = input("Start date (YYYY-MM-DD, leave blank for no lower bound): ").strip()
+        end = input("End date (YYYY-MM-DD, leave blank for no upper bound): ").strip()
+        if start and not _validate_iso_date(start):
+            print(f"Ignoring invalid start date {start!r}; expected YYYY-MM-DD.", file=sys.stderr)
+            start = ""
+        if end and not _validate_iso_date(end):
+            print(f"Ignoring invalid end date {end!r}; expected YYYY-MM-DD.", file=sys.stderr)
+            end = ""
+        if start:
+            update_env_file("NOTIFY_START_DATE", start)
+        if end:
+            update_env_file("NOTIFY_END_DATE", end)
+        if not start and not end:
+            print("No bounds provided; filter not configured.")
+        return
 
     month = input(
         "Only notify for a specific month? Enter 1-12 or a month name (e.g. April). Leave blank for no filter: "
     ).strip()
     if not month:
-        return None, None
+        return
 
     update_env_file("NOTIFY_MONTH", month)
 
     year = input("Notify year (optional; leave blank for current year): ").strip()
     if year:
         update_env_file("NOTIFY_YEAR", year)
-        return month, year
-
-    # If year is blank we don't write NOTIFY_YEAR; monitor.py will default to current year.
-    return month, None
 
 def setup_env_file():
     """Runs the full interactive setup to create/update the .env file."""
@@ -157,7 +185,7 @@ def setup_env_file():
     prompt_for_ntfy_url()
     prompt_for_locations(rmv_url)
     prompt_for_frequency()
-    prompt_for_notify_month_year()
+    prompt_for_notify_filter()
     print("\nConfiguration saved to .env file.")
     return True
 

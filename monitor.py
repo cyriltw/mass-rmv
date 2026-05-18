@@ -23,13 +23,13 @@ from pathlib import Path
 from tqdm import tqdm
 import wandb
 from rmv_checker import (
-    get_rmv_data, 
+    get_rmv_data,
     get_all_locations,
     prompt_for_rmv_url,
     prompt_for_ntfy_url,
     prompt_for_locations,
     prompt_for_frequency,
-    prompt_for_notify_month_year
+    prompt_for_notify_filter
 )
 from selenium.webdriver.chrome.service import Service as ChromeService
 
@@ -226,36 +226,77 @@ def _parse_target_month(value):
     }
     return month_map.get(key)
 
-def _get_notification_target():
+def _parse_iso_date(value):
+    """Parse a YYYY-MM-DD string into a datetime, or None on failure."""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d")
+    except ValueError:
+        logger.warning(f"Ignoring invalid date {raw!r}; expected YYYY-MM-DD.")
+        return None
+
+def _get_notification_filter():
     """
-    Determine which month/year should trigger notifications.
-    - NOTIFY_MONTH: 1-12 or month name (e.g. "April")
-    - NOTIFY_YEAR: optional (defaults to current year)
-    If NOTIFY_MONTH is unset/invalid, returns (None, None) meaning "no filter".
+    Determine which appointments should trigger notifications. Returns a dict:
+      {"kind": "range", "start": dt|None, "end": dt|None}
+      {"kind": "month", "month": int, "year": int}
+      {"kind": "none"}
+
+    Date range (NOTIFY_START_DATE / NOTIFY_END_DATE, inclusive) takes precedence
+    over the month filter (NOTIFY_MONTH / NOTIFY_YEAR) if any bound is set.
     """
+    start = _parse_iso_date(os.getenv("NOTIFY_START_DATE"))
+    end = _parse_iso_date(os.getenv("NOTIFY_END_DATE"))
+    if start or end:
+        if end:
+            end = end.replace(hour=23, minute=59, second=59)
+        return {"kind": "range", "start": start, "end": end}
+
     raw_month = os.getenv("NOTIFY_MONTH")
     month = _parse_target_month(raw_month)
     if month is None:
         if raw_month is not None and str(raw_month).strip():
             logger.warning(f"Ignoring invalid NOTIFY_MONTH={raw_month!r}; notifications will not be filtered.")
-        return None, None
+        return {"kind": "none"}
 
     year_raw = (os.getenv("NOTIFY_YEAR") or "").strip()
     if not year_raw:
-        return month, datetime.now().year
+        return {"kind": "month", "month": month, "year": datetime.now().year}
     try:
-        year = int(year_raw)
-        return month, year
+        return {"kind": "month", "month": month, "year": int(year_raw)}
     except ValueError:
         logger.warning(f"Ignoring invalid NOTIFY_YEAR={year_raw!r}; defaulting to current year.")
-        return month, datetime.now().year
+        return {"kind": "month", "month": month, "year": datetime.now().year}
 
-def _should_notify_for_date(dt, target_month, target_year):
+def _should_notify_for_date(dt, filt):
     if not dt:
         return False
-    if target_month is None:
+    kind = filt.get("kind")
+    if kind == "none":
         return True
-    return dt.month == target_month and dt.year == target_year
+    if kind == "range":
+        if filt["start"] and dt < filt["start"]:
+            return False
+        if filt["end"] and dt > filt["end"]:
+            return False
+        return True
+    if kind == "month":
+        return dt.month == filt["month"] and dt.year == filt["year"]
+    return True
+
+def _describe_filter(filt):
+    kind = filt.get("kind")
+    if kind == "range":
+        start = filt["start"].strftime("%Y-%m-%d") if filt["start"] else "any"
+        end = filt["end"].strftime("%Y-%m-%d") if filt["end"] else "any"
+        return f"date range {start} → {end}"
+    if kind == "month":
+        return f"{filt['month']:02d}/{filt['year']}"
+    return None
 
 def check_for_appointments(rmv_url, ntfy_url, locations_to_monitor, state, wandb_run=None, locations_map=None):
     """The core logic for checking appointments and sending notifications."""
@@ -279,11 +320,12 @@ def check_for_appointments(rmv_url, ntfy_url, locations_to_monitor, state, wandb
     # when appointments pass, but for now we update immediately to ensure
     # the state stays current with the latest available appointments
 
-    target_month, target_year = _get_notification_target()
-    if target_month is not None:
-        logger.info(f"Notification filter enabled: only notifying for {target_month:02d}/{target_year}.")
+    filt = _get_notification_filter()
+    filter_desc = _describe_filter(filt)
+    if filter_desc:
+        logger.info(f"Notification filter enabled: only notifying for {filter_desc}.")
     else:
-        logger.info("Notification filter disabled: notifying for any month.")
+        logger.info("Notification filter disabled: notifying for any date.")
     
     for location_data in live_data:
         location_id = str(location_data['id'])
@@ -328,13 +370,13 @@ def check_for_appointments(rmv_url, ntfy_url, locations_to_monitor, state, wandb
             # Log to wandb
             log_appointment_event(wandb_run, "expired_replaced", location_data, last_known_date_str, new_date_str, time_diff_hours, locations_map)
             message = message + "\n" + appointment_text_links()
-            # Send notification for the new appointment that replaced the expired one (if in target month/year)
-            if _should_notify_for_date(new_date, target_month, target_year):
+            # Send notification for the new appointment that replaced the expired one (if it matches the filter)
+            if _should_notify_for_date(new_date, filt):
                 send_ntfy_notification(ntfy_url, message)
             else:
                 logger.info(
                     f"Suppressed notification for {location_name}: {new_date.strftime('%a, %b %d, %Y')} "
-                    f"(outside target {target_month:02d}/{target_year})."
+                    f"(outside target {filter_desc})."
                 )
             continue
 
@@ -372,12 +414,12 @@ def check_for_appointments(rmv_url, ntfy_url, locations_to_monitor, state, wandb
             logger.info(f"Location {location_name} (ID: {location_id}) became available again. Previous: {last_known_date_str}, New: {new_date_str}")
             message = message + "\n" + appointment_text_links()
             
-            if _should_notify_for_date(new_date, target_month, target_year):
+            if _should_notify_for_date(new_date, filt):
                 send_ntfy_notification(ntfy_url, message)
             else:
                 logger.info(
                     f"Suppressed notification for {location_name}: {new_date.strftime('%a, %b %d, %Y')} "
-                    f"(outside target {target_month:02d}/{target_year})."
+                    f"(outside target {filter_desc})."
                 )
             continue
 
@@ -394,14 +436,14 @@ def check_for_appointments(rmv_url, ntfy_url, locations_to_monitor, state, wandb
             
             message = message + "\n" + appointment_text_links()
             
-            if _should_notify_for_date(new_date, target_month, target_year):
+            if _should_notify_for_date(new_date, filt):
                 send_ntfy_notification(ntfy_url, message)
             else:
                 logger.info(
                     f"Suppressed notification for {location_name}: {new_date.strftime('%a, %b %d, %Y')} "
-                    f"(outside target {target_month:02d}/{target_year})."
+                    f"(outside target {filter_desc})."
                 )
-            
+
             # Log to wandb
             time_diff_hours = None
             if new_date and last_known_date:
@@ -505,11 +547,13 @@ def run_monitor():
         frequency_minutes_str = str(prompt_for_frequency())
         load_dotenv(override=True)
 
-    notify_month = os.getenv("NOTIFY_MONTH")
-    if not notify_month and is_interactive:
+    has_filter = any(
+        os.getenv(k) for k in ("NOTIFY_MONTH", "NOTIFY_START_DATE", "NOTIFY_END_DATE")
+    )
+    if not has_filter and is_interactive:
         # Optional: only prompt in interactive mode; leave unset to disable filtering.
-        logger.info("Optional: configure month/year notification filter.")
-        prompt_for_notify_month_year()
+        logger.info("Optional: configure notification filter (month/year or date range).")
+        prompt_for_notify_filter()
         load_dotenv(override=True)
     
     locations_to_monitor_ids = locations_to_monitor_ids_str.split(',')
